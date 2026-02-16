@@ -1,223 +1,275 @@
-#!/usr/bin/python
-# -*- coding: utf-8 -*-
 """
-This sample demonstrates a simple skill built with the Amazon Alexa Skills Kit.
-The Intent Schema, Custom Slots, and Sample Utterances for this skill, as well
-as testing instructions are located at http://amzn.to/1LzFrj6
-
-For additional samples, visit the Alexa Skills Kit Getting Started guide at
-http://amzn.to/1LGWsLG
+Alexa Skill Lambda: Menu Semanal
+Lee la hoja de Google Sheets con el plan de comidas y responde qué hay hoy,
+mañana o cualquier día de la semana.
 """
 
-from __future__ import print_function
-from botocore.vendored import requests
-import datetime
-import string
+import csv
+import io
+import locale
+import logging
+from datetime import datetime, timedelta
+from urllib.request import urlopen
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# URL de exportación CSV de tu Google Sheet (debe ser público o "cualquiera con el enlace")
+SHEET_CSV_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "TU_SPREADSHEET_ID_AQUI"
+    "/export?format=csv&gid=0"
+)
+
+DIAS_SEMANA = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+
+# Mapeo de datetime.weekday() (0=Monday) a nombre en español
+WEEKDAY_TO_DIA = {
+    0: "lunes",
+    1: "martes",
+    2: "miércoles",
+    3: "jueves",
+    4: "viernes",
+    5: "sábado",
+    6: "domingo",
+}
 
 
-# --------------- Helpers that build all of the responses ----------------------
-
-def build_speechlet_response(title, output, reprompt_text, should_end_session):
-    return {
-        'outputSpeech': {
-            'type': 'PlainText',
-            'text': output
-        },
-        'card': {
-            'type': 'Simple',
-            'title': "SessionSpeechlet - " + title,
-            'content': "SessionSpeechlet - " + output
-        },
-        'reprompt': {
-            'outputSpeech': {
-                'type': 'PlainText',
-                'text': reprompt_text
-            }
-        },
-        'shouldEndSession': should_end_session
-    }
-
-
-def build_response(session_attributes, speechlet_response):
-    return {
-        'version': '1.0',
-        'sessionAttributes': session_attributes,
-        'response': speechlet_response
-    }
-
-
-# --------------- Functions that control the skill's behavior ------------------
-
-def get_welcome_response():
-    """ If we wanted to initialize the session to have some attributes we could
-    add those here
+def fetch_menu():
+    """Descarga el CSV y devuelve una lista de semanas.
+    Cada semana es un dict {dia: {"comida": ..., "cena": ...}}.
     """
+    response = urlopen(SHEET_CSV_URL)
+    content = response.read().decode("utf-8")
+    reader = csv.reader(io.StringIO(content))
 
-    session_attributes = {}
-    card_title = "Welcome"
-    
-    menu = get_daily_food('hoy')
-    speech = get_menu_string(menu, 'hoy')
-    speech_output = speech + "¿Qué otro día quieres consultar?"
-    # If the user either does not reply to the welcome message or says something
-    # that is not understood, they will be prompted again with this text.
-    reprompt_text = "No te he entendido bien. ¿Qué día quieres consultar?"
-    should_end_session = False
-    return build_response(session_attributes, build_speechlet_response(
-        card_title, speech_output, reprompt_text, should_end_session))
+    weeks = []
+    current_week = {}
+
+    header = next(reader, None)  # Saltar cabecera (, Comida, Cena)
+
+    for row in reader:
+        if len(row) < 3:
+            continue
+
+        dia_raw = row[0].strip().lower()
+
+        # Normalizar: quitar tildes para comparación
+        dia_norm = _normalize(dia_raw)
+
+        if dia_norm not in [_normalize(d) for d in DIAS_SEMANA]:
+            continue
+
+        # Encontrar el día real con tilde
+        dia = next(d for d in DIAS_SEMANA if _normalize(d) == dia_norm)
+
+        comida = row[1].strip() if row[1].strip() else None
+        cena = row[2].strip() if row[2].strip() else None
+
+        # Si ya vimos este día, estamos en una nueva semana
+        if dia in current_week:
+            weeks.append(current_week)
+            current_week = {}
+
+        current_week[dia] = {"comida": comida, "cena": cena}
+
+    if current_week:
+        weeks.append(current_week)
+
+    return weeks
 
 
-def handle_session_end_request():
-    card_title = "Session Ended"
-    speech_output = "Thank you for trying the Alexa Skills Kit sample. " \
-                    "Have a nice day! "
-    # Setting this to true ends the session and exits the skill.
-    should_end_session = True
-    return build_response({}, build_speechlet_response(
-        card_title, speech_output, None, should_end_session))
+def _normalize(text):
+    """Quita tildes para comparar días."""
+    replacements = {"á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u"}
+    result = text.lower()
+    for accented, plain in replacements.items():
+        result = result.replace(accented, plain)
+    return result
 
 
-def create_favorite_color_attributes(favorite_color):
-    return {"favoriteColor": favorite_color}
+def get_menu_for_day(target_date):
+    """Devuelve (comida, cena) para una fecha dada."""
+    weeks = fetch_menu()
+    if not weeks:
+        return None, None
 
-def get_menu():
-    r = requests.get('https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/edit?usp=sharing')
-    if r.status_code == 200:
-        beginning = 'content="Sheet1'
-        begin = r.text.find(beginning) + len(beginning) + 2
-        end = r.text.find('"><meta name="google" content="notranslate">')
-        text_menu = r.text[begin: end]
-        menu_list = []
-        for line in text_menu.splitlines():
-            menu_list.append(line.split(','))
-        return menu_list
+    dia = WEEKDAY_TO_DIA[target_date.weekday()]
+
+    # Usar el número de semana ISO para alternar entre semanas
+    iso_week = target_date.isocalendar()[1]
+    week_index = iso_week % len(weeks)
+
+    week = weeks[week_index]
+    if dia in week:
+        return week[dia]["comida"], week[dia]["cena"]
+
+    return None, None
+
+
+def build_meal_speech(dia_nombre, comida, cena):
+    """Construye la frase de respuesta."""
+    parts = []
+    if comida and cena:
+        parts.append(f"El {dia_nombre}, de comida hay {comida} y de cena {cena}")
+    elif comida:
+        parts.append(f"El {dia_nombre}, de comida hay {comida}. No hay cena planificada")
+    elif cena:
+        parts.append(f"El {dia_nombre}, no hay comida planificada, pero de cena hay {cena}")
     else:
-        return None
+        parts.append(f"El {dia_nombre} no hay nada planificado")
+    return ". ".join(parts)
 
 
-def get_spanish_day_from_weekday(weekday):
-    return ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'][weekday]
-
-
-def get_daily_food(when):
-    if when == 'hoy':
-        weekday = (datetime.datetime.today() + datetime.timedelta(hours=2)).weekday()
-        dia = get_spanish_day_from_weekday(weekday)
-    elif when == 'mañana':
-        weekday = (datetime.datetime.today() + datetime.timedelta(days=1, hours=2)).weekday()
-        dia = get_spanish_day_from_weekday(weekday)
-    else:
-        dia = when
-    print(dia)
-    menu = get_menu()
-    for day in menu:
-        if day[0].lower() == dia.lower():
-            ret = []
-            for comida in day[1:]:
-                ret.append(comida)
-            return ret
-    return []
-
-
-def check_food(intent, session):
-    when = intent['slots']['when']['value'].lower()
-    if 'nada' in when or 'ning' in when:
-        speech = 'ok'
-    else:
-        menu = get_daily_food(when)
-        speech = get_menu_string(menu, when)
-    
-    return build_response({}, build_speechlet_response(
-        "Hola", speech, "", True))
-
-def get_menu_string(menu, when):
-    if len(menu) == 2:
-        speech = when + " tenemos " + menu[0] + " para comer y " + menu[1] + " para cenar."
-    elif len(menu) == 1:
-        speech = when + " tenemos " + menu[0] + " para comer"
-    else:
-        speech = when + "No sé que vamos a comer "
-    if when.lower() != 'hoy' and when.lower() != 'mañana':
-        speech = 'el ' + speech
-    return speech
-    
-
-# --------------- Events ------------------
-
-def on_session_started(session_started_request, session):
-    """ Called when the session starts """
-
-    print("on_session_started requestId=" + session_started_request['requestId']
-          + ", sessionId=" + session['sessionId'])
-
-
-def on_launch(launch_request, session):
-    """ Called when the user launches the skill without specifying what they
-    want
+def resolve_target_date(day_slot_value):
+    """Convierte el valor del slot AMAZON.DATE a una fecha.
+    AMAZON.DATE devuelve formatos como: 2026-02-17, 2026-W08, 2026-W08-WE
     """
+    today = datetime.now()
 
-    print(session['sessionId'])
-    print("on_launch requestId=" + launch_request['requestId'] +
-          ", sessionId=" + session['sessionId'])
-    # Dispatch to your skill's launch
-    return get_welcome_response()
+    if not day_slot_value:
+        return today
 
+    val = day_slot_value.strip()
 
-def on_intent(intent_request, session):
-    """ Called when the user specifies an intent for this skill """
+    # AMAZON.DATE devuelve fechas ISO: "2026-02-17"
+    try:
+        return datetime.strptime(val, "%Y-%m-%d")
+    except ValueError:
+        pass
 
-    print("on_intent requestId=" + intent_request['requestId'] +
-          ", sessionId=" + session['sessionId'])
+    # También puede devolver semanas: "2026-W08" — usar el lunes de esa semana
+    try:
+        return datetime.strptime(val + "-1", "%G-W%V-%u")
+    except ValueError:
+        pass
 
-    intent = intent_request['intent']
-    intent_name = intent_request['intent']['name']
+    # Fallback: intentar matchear nombre de día en español
+    val_norm = _normalize(val.lower())
+    for i, dia in enumerate(DIAS_SEMANA):
+        if _normalize(dia) == val_norm:
+            today_weekday = today.weekday()
+            days_ahead = i - today_weekday
+            if days_ahead <= 0:
+                days_ahead += 7
+            if days_ahead == 7:
+                days_ahead = 0
+            return today + timedelta(days=days_ahead)
 
-    # Dispatch to your skill's intent handlers
-    if intent_name == "Tomorrow":
-        return check_food(intent, session)
-    elif intent_name == "AMAZON.HelpIntent":
-        return get_welcome_response()
-    elif intent_name == "AMAZON.CancelIntent" or intent_name == "AMAZON.StopIntent":
-        return handle_session_end_request()
-    else:
-        raise ValueError("Invalid intent")
-
-
-def on_session_ended(session_ended_request, session):
-    """ Called when the user ends the session.
-
-    Is not called when the skill returns should_end_session=true
-    """
-    print("on_session_ended requestId=" + session_ended_request['requestId'] +
-          ", sessionId=" + session['sessionId'])
-    # add cleanup logic here
+    return today
 
 
-# --------------- Main handler ------------------
+# ─── Alexa Handlers ───────────────────────────────────────────────────────────
+
 
 def lambda_handler(event, context):
-    """ Route the incoming request based on type (LaunchRequest, IntentRequest,
-    etc.) The JSON body of the request is provided in the event parameter.
-    """
-    print("event.session.application.applicationId=" +
-          event['session']['application']['applicationId'])
+    """Entry point de la Lambda."""
+    logger.info("Event: %s", event)
 
-    """
-    Uncomment this if statement and populate with your skill's application ID to
-    prevent someone else from configuring a skill that sends requests to this
-    function.
-    """
-    # if (event['session']['application']['applicationId'] !=
-    #         "amzn1.echo-sdk-ams.app.[unique-value-here]"):
-    #     raise ValueError("Invalid Application ID")
+    request = event.get("request", {})
+    request_type = request.get("type", "")
 
-    if event['session']['new']:
-        on_session_started({'requestId': event['request']['requestId']},
-                           event['session'])
-    print(event['session'])
-    if event['request']['type'] == "LaunchRequest":
-        return on_launch(event['request'], event['session'])
-    elif event['request']['type'] == "IntentRequest":
-        return on_intent(event['request'], event['session'])
-    elif event['request']['type'] == "SessionEndedRequest":
-        return on_session_ended(event['request'], event['session'])
+    if request_type == "LaunchRequest":
+        return handle_launch()
+    elif request_type == "IntentRequest":
+        return handle_intent(request)
+    elif request_type == "SessionEndedRequest":
+        return handle_session_end()
+    else:
+        return build_response("No he entendido la petición.", should_end=True)
+
+
+def handle_launch():
+    """Cuando el usuario abre la skill sin decir nada más."""
+    today = datetime.now()
+    dia = WEEKDAY_TO_DIA[today.weekday()]
+    comida, cena = get_menu_for_day(today)
+
+    speech = build_meal_speech(dia, comida, cena)
+    speech += ". ¿Quieres consultar otro día?"
+    reprompt = "¿Qué día quieres consultar? Puedes decir mañana, o un día de la semana."
+
+    return build_response(speech, reprompt=reprompt, should_end=False)
+
+
+def handle_intent(request):
+    """Maneja los diferentes intents."""
+    intent_name = request["intent"]["name"]
+
+    if intent_name == "ConsultarMenuIntent":
+        return handle_consultar_menu(request)
+    elif intent_name in ("NingunoIntent", "AMAZON.NoIntent"):
+        return build_response("¡Buen provecho!", should_end=True)
+    elif intent_name == "AMAZON.HelpIntent":
+        return handle_help()
+    elif intent_name in ("AMAZON.CancelIntent", "AMAZON.StopIntent"):
+        return build_response("¡Buen provecho!", should_end=True)
+    elif intent_name == "AMAZON.FallbackIntent":
+        return build_response(
+            "No he entendido. Puedes decir: ¿qué hay de comer mañana? "
+            "O decir un día de la semana.",
+            reprompt="¿Qué día quieres consultar?",
+            should_end=False,
+        )
+    else:
+        return build_response(
+            "No he entendido. ¿Qué día quieres consultar?",
+            reprompt="Puedes decir mañana, o un día como lunes o martes.",
+            should_end=False,
+        )
+
+
+def handle_consultar_menu(request):
+    """Maneja el intent de consultar menú para un día."""
+    slots = request["intent"].get("slots", {})
+    day_slot = slots.get("dia", {})
+    day_value = day_slot.get("value")
+
+    target_date = resolve_target_date(day_value)
+    dia = WEEKDAY_TO_DIA[target_date.weekday()]
+    comida, cena = get_menu_for_day(target_date)
+
+    speech = build_meal_speech(dia, comida, cena)
+    speech += ". ¿Quieres consultar otro día?"
+    reprompt = "¿Qué otro día quieres consultar?"
+
+    return build_response(speech, reprompt=reprompt, should_end=False)
+
+
+def handle_help():
+    speech = (
+        "Puedo decirte qué hay de comer y cenar cada día. "
+        "Prueba a decir: ¿qué hay de comer mañana? "
+        "O también: ¿qué hay el viernes?"
+    )
+    return build_response(speech, reprompt="¿Qué día quieres consultar?", should_end=False)
+
+
+def handle_session_end():
+    return build_response("", should_end=True)
+
+
+# ─── Response builder ─────────────────────────────────────────────────────────
+
+
+def build_response(speech, reprompt=None, should_end=True):
+    response = {
+        "version": "1.0",
+        "response": {
+            "outputSpeech": {
+                "type": "PlainText",
+                "text": speech,
+            },
+            "shouldEndSession": should_end,
+        },
+    }
+
+    if reprompt:
+        response["response"]["reprompt"] = {
+            "outputSpeech": {
+                "type": "PlainText",
+                "text": reprompt,
+            }
+        }
+
+    return response

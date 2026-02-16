@@ -1,0 +1,65 @@
+{
+  "interactionModel": {
+    "languageModel": {
+      "invocationName": "comida del día",
+      "intents": [
+        {
+          "name": "ConsultarMenuIntent",
+          "slots": [
+            {
+              "name": "dia",
+              "type": "AMAZON.DATE"
+            }
+          ],
+          "samples": [
+            "qué hay de comer {dia}",
+            "qué hay {dia}",
+            "qué comemos {dia}",
+            "qué cenamos {dia}",
+            "qué hay de comer el {dia}",
+            "qué hay de cenar {dia}",
+            "qué hay de cenar el {dia}",
+            "dime el menú del {dia}",
+            "dime qué hay el {dia}",
+            "consulta el {dia}",
+            "y el {dia}",
+            "{dia}"
+          ]
+        },
+        {
+          "name": "NingunoIntent",
+          "samples": [
+            "ninguno",
+            "ningún día",
+            "nada",
+            "nada más",
+            "no quiero más",
+            "ya está",
+            "eso es todo"
+          ]
+        },
+        {
+          "name": "AMAZON.NoIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.HelpIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.StopIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.CancelIntent",
+          "samples": []
+        },
+        {
+          "name": "AMAZON.FallbackIntent",
+          "samples": []
+        }
+      ],
+      "types": []
+    }
+  }
+}
